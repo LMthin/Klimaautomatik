@@ -32,9 +32,12 @@ int button = 12; // button on pin 12
 
 LiquidCrystal lcd(7, 6, 5, 4, 3, 13);  // RS, E, D4, D5, D6, D7
 unsigned long acStartTime = 0;
-unsigned long totalAcOnTime = 0;
+unsigned long sendAcTime = 0;
 unsigned long currentAcOnTime = 0;
-float totalPowerConsumption = 0;  // in Watt-hours
+float currentPowerConsumption = 0;  // in Watt-hours
+
+float sendPowerConsumption = 0; 
+
 bool acOn = false;
 
 void setup() {
@@ -108,6 +111,7 @@ void displayK() {
 }
 
 float calculatePowerConsumption(unsigned long duration) {
+  
   // Average bus-AC uses 32000 watts
   return (27000.0 * duration) / (1000.0 * 3600.0);  // Convert to Watt-hours
 
@@ -138,12 +142,11 @@ void updateLCD(float temperature) {
   lcd.print("Temp: ");
   lcd.print(temperature, 1);
   lcd.print("C");
-
   lcd.setCursor(0, 1);
   lcd.print("AC:");
-  printTime(totalAcOnTime + currentAcOnTime);
+  lcd.print(acOn ? "on" : "off");
   lcd.print(" ");
-  lcd.print(totalPowerConsumption / 1000.0, 2); // Convert to kWh, display with 2 decimal places
+  lcd.print(currentPowerConsumption / 1000.0, 2); // Convert to kWh, display with 2 decimal places
   lcd.print("kWh");
 
 }
@@ -170,17 +173,42 @@ void windowOpen()
   }
 }
 
-void sendDataToPi(float temperature, float humidity, unsigned long acRunningTime, float powerConsumption) {
-  Serial.print("Temperature: ");
+void sendDataToPi(bool acOn, float temperature, float humidity, float powerConsumption, long sendAcTimeHelper) {
+ 
+  long elapsedTime = sendAcTimeHelper / 1000;  // Use the stored AC runtime
+
+
+  int hours = (elapsedTime / 3600);
+  int minutes = (elapsedTime % 3600) / 60;
+  int seconds = elapsedTime % 60;
+  
+  Serial.print("AC: ");
+  Serial.print(acOn ? "on" : "off");  // 1 for on, 0 for off
+  Serial.print(" Temperature: ");
   Serial.print(temperature, 2);
-  Serial.print(", Humidity: ");
+  Serial.print("°C, Humidity: ");
   Serial.print(humidity, 2);
-  Serial.print(", AC Running Time: ");
-  Serial.print(acRunningTime);  // This should not include 'seconds'
-  Serial.print(", Power Consumption: ");
+  Serial.print(", Power Consumed: ");
   Serial.print(powerConsumption / 1000.0, 2); // Convert to kWh
-  Serial.println(" kWh");
+  Serial.print(" kWh, AC on for: ");
+  
+// Print the formatted time in HH:MM:SS format
+  if (hours < 0 || minutes < 0 || seconds < 0) {
+    Serial.println("N/A");  // In case of invalid time
+  } else {
+    Serial.print(hours); 
+    Serial.print(":");
+    if (minutes < 10) Serial.print("0");
+    Serial.print(minutes);
+    Serial.print(":");
+    if (seconds < 10) Serial.print("0");
+    Serial.println(seconds);
+  }
+  
 }
+
+unsigned long lastAcOffTime = 0;  // To store last AC off time
+float totalPowerConsumption = 0;  // Accumulate power during on-time
 
 unsigned long lastDataSentTime = 0;  // Time of the last data sent
 const unsigned long dataInterval = 10000;  // 10 seconds interval for sending data
@@ -212,7 +240,7 @@ void loop() {
 
   }
 
-  if(t > 25) // if temp over 22C
+  if(t > 24) // if temp over 22C
   {
     if(cPos > 0)
     {  
@@ -224,7 +252,6 @@ void loop() {
     if(!acOn)
     {
       acStartTime = millis();
-    
     }
 
     acOn = true;
@@ -250,11 +277,22 @@ void loop() {
 
   } else
   {
-    if(acOn)
-    {
-      totalAcOnTime += currentAcOnTime;
+    if (acOn){
+      // Calculate the total power consumption for the period
+      totalPowerConsumption = calculatePowerConsumption(millis() - acStartTime);
+
+     // Store the last AC runtime and power consumption for display when AC is off
+      lastAcOffTime = millis() - acStartTime;
+
+      // Send data with the last AC on-time and power consumption
+      sendDataToPi(false, t, h, totalPowerConsumption, lastAcOffTime);
+      
+      // Reset AC-specific variables
+      totalPowerConsumption = 0;
+      acStartTime = 0;
+
     }
-    
+
     acOn = false;
     displayO();
 
@@ -262,31 +300,21 @@ void loop() {
   
   if (acOn)
   {
-    currentAcOnTime = (millis() - acStartTime) / 1000;  // Convert to seconds and update time running
-    totalPowerConsumption += calculatePowerConsumption(millis() - acStartTime); //update total power cons.
-
+    // Update the current power consumption as the AC runs
+    currentPowerConsumption = calculatePowerConsumption(millis() - acStartTime);
   }
-  //updateLCD(t);
 
-   // Check if it's time to update the LCD (every 1 second)
+  // Check if it's time to update the LCD (every 1 second)
   if (millis() - lastLCDUpdateTime >= lcdUpdateInterval) {
     updateLCD(t);  // Update the LCD with the latest temperature, AC runtime, and power consumption
     lastLCDUpdateTime = millis();  // Update the last LCD update time
   }
 
-  // // Send the data over Serial to Raspberry Pi
-  // Serial.print(t);                      // Send temperature
-  // Serial.print(","); 
-  // Serial.print(currentAcOnTime);         // Send AC running time
-  // Serial.print(",");
-  // Serial.println(totalPowerConsumption); // Send total power consumption
-
- // Sending data to Raspberry Pi
- //  sendDataToPi(t, h, totalAcOnTime, totalPowerConsumption);
-
   // Check if 10 seconds have passed since the last data was sent
   if (millis() - lastDataSentTime >= dataInterval) {
-    sendDataToPi(t, h, totalAcOnTime, totalPowerConsumption);  // Send data to Raspberry Pi
+    sendDataToPi(acOn, t, h, sendPowerConsumption, sendAcTime);  // Send data to Raspberry Pi
+    sendPowerConsumption = 0;
+    sendAcTime = 0;
     lastDataSentTime = millis();  // Update the last data sent time
   }
 
